@@ -8,14 +8,39 @@ const app = express()
 const PORT = process.env.PORT || 5000
 const apiRouter = express.Router()
 
-app.use(cors())
+const corsOrigins = (process.env.CORS_ORIGIN || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean)
+
+app.use(cors(corsOrigins.length > 0
+  ? {
+      origin(origin, callback) {
+        if (!origin || corsOrigins.includes(origin)) return callback(null, true)
+        return callback(null, false)
+      }
+    }
+  : undefined))
 app.use(express.json())
 
-console.log('DATABASE_URL:', process.env.DATABASE_URL)
+function getDatabaseSslConfig() {
+  if (process.env.DATABASE_SSL === 'false') return false
+  if (process.env.DATABASE_SSL === 'true') return { rejectUnauthorized: false }
+  if (!process.env.DATABASE_URL) return false
+
+  const url = process.env.DATABASE_URL.toLowerCase()
+  if (url.includes('sslmode=require') || url.includes('supabase.co') || url.includes('pooler.supabase.com')) {
+    return { rejectUnauthorized: false }
+  }
+  return false
+}
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // ssl: { rejectUnauthorized: false }
+  ssl: getDatabaseSslConfig(),
+  max: Number(process.env.DB_POOL_MAX || 5),
+  idleTimeoutMillis: Number(process.env.DB_IDLE_TIMEOUT_MS || 30000),
+  connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS || 10000)
 })
 
 // ---------- helpers ----------
@@ -32,6 +57,7 @@ function validateProductInput(req, res, next) {
 
 async function ensureProductStatusColumn(client) {
   await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'Active'`)
+  await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS current_quantity INTEGER NOT NULL DEFAULT 0`)
 }
 
 async function ensureStockStatusTypeConstraint(client) {
@@ -67,6 +93,16 @@ function buildProductResponse(row, isSales) {
 // ---------- routes ----------
 apiRouter.get('/', (req, res) => {
   res.json({ message: 'Datacom Inventory API is running' })
+})
+
+apiRouter.get('/health', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT NOW() AS now')
+    res.json({ ok: true, database: 'connected', now: result.rows[0].now })
+  } catch (err) {
+    console.error('DB error (GET /health):', err.message)
+    res.status(500).json({ ok: false, database: 'error', error: err.message })
+  }
 })
 
 // ========== USER AUTH ==========
@@ -491,6 +527,7 @@ apiRouter.put('/stock-movements/:id', async (req, res) => {
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
+      await ensureProductStatusColumn(client)
 
       // 1. Fetch the old movement record
       const oldMovement = await client.query(

@@ -1,4 +1,13 @@
 node_modules/
 frontend/node_modules/
+.npm-cache/
 .env
+.env.*
+backend/.env
+backend/.env.*
+frontend/.env
+frontend/.env.*
+!.env.example
+!backend/.env.example
+!frontend/.env.example
 *.log
